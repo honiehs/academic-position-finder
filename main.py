@@ -326,7 +326,16 @@ async def handle_pos_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
-    app = Application.builder().token(TOKEN).post_init(post_init_setup).build()
+    PROXY_URL = "https://academicpositionfinder.honiehsaedii.workers.dev"
+
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .base_url(f"{PROXY_URL}/bot")
+        .base_file_url(f"{PROXY_URL}/file/bot")
+        # اگر خط post_init یا موارد دیگری داشتی، اینجا نگهشان دار
+        .build()
+    )
     
     cv_h = ConversationHandler(
         entry_points=[CommandHandler('start', start), MessageHandler(filters.Regex('^👤'), check_and_handle_profile_btn), CallbackQueryHandler(start_from_inline_edit, pattern='^edit_profile$')],
