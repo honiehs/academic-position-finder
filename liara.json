@@ -2,7 +2,7 @@
   "app": "academic-position-finder",
   "port": 80,
   "build": {
-    "location": "iran"
+    "location": "germany"
   },
   "disks": [
     {
