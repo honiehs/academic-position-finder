@@ -6,12 +6,12 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import (
-    Update, ReplyKeyboardMarkup, 
+    Update, ReplyKeyboardMarkup,
     InlineKeyboardButton, InlineKeyboardMarkup,
     BotCommand, MenuButtonCommands
 )
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, 
+    Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 )
 from database import init_db, SessionLocal, UserProfile, Position
@@ -54,7 +54,6 @@ HAS_LANG_KEYBOARD = [['✅ بله', '❌ خیر'], [BACK_BTN]]
 LANG_TYPE_KEYBOARD = [['🇬🇧 IELTS', '🇺🇸 TOEFL'], ['🗣 مدرک زبان دیگری دارم'], [BACK_BTN]]
 ONLY_BACK_KEYBOARD = [[BACK_BTN]]
 
-# کلیدواژه‌های تشخیص پوزیشن تحصیلی (رایگان و بدون نیاز به API)
 ACADEMIC_KEYWORDS = [
     'phd', 'ph.d', 'master', 'msc', 'postdoc', 'post-doc', 'doctoral', 'doctorate',
     'scholarship', 'fellowship', 'fully funded', 'funding', 'stipend', 'tuition',
@@ -91,12 +90,10 @@ def update_user_db(user_id: int, **kwargs) -> bool:
         db.close()
 
 def is_academic_position(text: str) -> bool:
-    """بررسی هوشمند برای تشخیص اینکه متن واقعاً مربوط به پوزیشن تحصیلی است یا خیر"""
     if not text or len(text.strip()) < 25:
         return False
     l_text = text.lower()
     score = sum(1 for kw in ACADEMIC_KEYWORDS if kw in l_text)
-    # حداقل ۲ کلیدواژه مرتبط باید در متن (یا متن استخراج‌شده از لینک/عکس) وجود داشته باشد
     return score >= 2
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -111,7 +108,6 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         pass
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """نمایش منوی اصلی در /start، /menu و دکمه بازگشت"""
     await update.message.reply_text(
         "سلام! 👋🎓 به دستیار هوشمند اپلای خوش آمدی.\n\n🏠 <b>منوی اصلی:</b>",
         reply_markup=ReplyKeyboardMarkup(MAIN_MENU_KEYBOARD, resize_keyboard=True),
@@ -120,7 +116,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 async def get_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN:
+    if update.message.text and update.message.text.strip() == BACK_BTN:
         return await show_main_menu(update, context)
     if not update.message.document:
         await update.message.reply_text(
@@ -128,13 +124,13 @@ async def get_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True)
         )
         return RESUME
-        
+
     wait_msg = await update.message.reply_text("⏳ در حال دریافت فایل رزومه...")
     doc = update.message.document
     user_id = update.message.from_user.id
     safe_filename = re.sub(r'[^\w\.-]', '_', doc.file_name or "resume.pdf")
     file_path = f"data/resumes/{user_id}_{safe_filename}"
-    
+
     if not update_user_db(user_id, resume_file_id=doc.file_id, resume_file_path=file_path):
         await wait_msg.edit_text("⚠️ خطا در ذخیره. دوباره تلاش کن.")
         return RESUME
@@ -144,7 +140,7 @@ async def get_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await file.download_to_drive(file_path)
     except Exception:
         pass
-    
+
     await wait_msg.delete()
     await update.message.reply_text(
         "✅ رزومه دریافت شد\n\n🎓 مقطع مورد نظرت رو انتخاب کن:",
@@ -153,22 +149,28 @@ async def get_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return DEGREE
 
 async def get_degree(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    update_user_db(update.message.from_user.id, target_degrees=update.message.text.replace("🎓", "").strip())
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    update_user_db(update.message.from_user.id, target_degrees=text.replace("🎓", "").strip())
     await update.message.reply_text("📚 رشته رو انتخاب کن:", reply_markup=ReplyKeyboardMarkup(FIELD_KEYBOARD, resize_keyboard=True))
     return FIELD
 
 async def get_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    if "در لیست نیست" in update.message.text:
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    if text == '✏️ رشته‌ام در لیست نیست (تایپ می‌کنم)':
         await update.message.reply_text("✍️ نام رشته رو تایپ کن:", reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True))
         return CUSTOM_FIELD
-    update_user_db(update.message.from_user.id, target_field=re.sub(r'^[^\w\s]+\s*', '', update.message.text).strip())
+    update_user_db(update.message.from_user.id, target_field=re.sub(r'^[^\w\s]+\s*', '', text).strip())
     return await ask_country(update, context)
 
 async def get_custom_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    update_user_db(update.message.from_user.id, target_field=update.message.text.strip())
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    update_user_db(update.message.from_user.id, target_field=text)
     return await ask_country(update, context)
 
 async def ask_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -176,16 +178,20 @@ async def ask_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return COUNTRY
 
 async def get_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    if "در لیست نیست" in update.message.text:
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    if text == '🌍 کشور هدفم در لیست نیست (تایپ می‌کنم)':
         await update.message.reply_text("✍️ نام کشور رو تایپ کن:", reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True))
         return CUSTOM_COUNTRY
-    update_user_db(update.message.from_user.id, target_countries=update.message.text.strip())
+    update_user_db(update.message.from_user.id, target_countries=text)
     return await ask_language(update, context)
 
 async def get_custom_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    update_user_db(update.message.from_user.id, target_countries=update.message.text.strip())
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    update_user_db(update.message.from_user.id, target_countries=text)
     return await ask_language(update, context)
 
 async def ask_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -193,39 +199,50 @@ async def ask_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return HAS_LANG
 
 async def get_has_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    if 'بله' in update.message.text:
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    if text == '✅ بله':
         update_user_db(update.message.from_user.id, has_language_cert=True)
         await update.message.reply_text("🏅 نوع مدرک:", reply_markup=ReplyKeyboardMarkup(LANG_TYPE_KEYBOARD, resize_keyboard=True))
         return LANG_TYPE
-    elif 'خیر' in update.message.text:
+    elif text == '❌ خیر':
         update_user_db(update.message.from_user.id, has_language_cert=False, language_score="ندارد ❌")
         return await finish_profile(update, context)
     else:
-        await update.message.reply_text("⚠️ لطفاً یکی از گزینه‌های «✅ بله» یا «❌ خیر» را انتخاب کن:", reply_markup=ReplyKeyboardMarkup(HAS_LANG_KEYBOARD, resize_keyboard=True))
+        await update.message.reply_text(
+            "⚠️ لطفاً یکی از گزینه‌های «✅ بله» یا «❌ خیر» را انتخاب کن:",
+            reply_markup=ReplyKeyboardMarkup(HAS_LANG_KEYBOARD, resize_keyboard=True)
+        )
         return HAS_LANG
 
 async def get_lang_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    if 'دیگری' in update.message.text:
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    if text == '🗣 مدرک زبان دیگری دارم':
         await update.message.reply_text("✍️ نام مدرک:", reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True))
         return CUSTOM_LANG_TYPE
-    context.user_data['lang_type'] = update.message.text.replace("🇬🇧", "").replace("🇺🇸", "").strip()
+    context.user_data['lang_type'] = text.replace("🇬🇧", "").replace("🇺🇸", "").strip()
     await update.message.reply_text("🔢 نمره زبانت رو وارد کن:", reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True))
     return LANG_SCORE
 
 async def get_custom_lang_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    context.user_data['lang_type'] = update.message.text.strip()
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
+    context.user_data['lang_type'] = text
     await update.message.reply_text("🔢 نمره زبانت رو وارد کن:", reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True))
     return LANG_SCORE
 
 async def get_lang_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == BACK_BTN: return await show_main_menu(update, context)
+    text = update.message.text.strip()
+    if text == BACK_BTN:
+        return await show_main_menu(update, context)
     update_user_db(
         update.message.from_user.id,
         has_language_cert=True,
-        language_score=f"{context.user_data.get('lang_type', '')} (نمره: {update.message.text.strip()}) ✅"
+        language_score=f"{context.user_data.get('lang_type', '')} (نمره: {text}) ✅"
     )
     return await finish_profile(update, context)
 
@@ -258,16 +275,14 @@ async def check_and_handle_profile_btn(update: Update, context: ContextTypes.DEF
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.telegram_id == update.message.from_user.id).first()
     db.close()
-    
-    # اگر پروفایل وجود نداشت یا ناقص بود، ساخت پروفایل را شروع کن
+
     if not user or not user.target_degrees or not user.target_field:
         await update.message.reply_text(
             "📭 هنوز پروفایلت کامل نشده است.\n\n📄 لطفاً فایل رزومه (PDF/Word) خودت رو بفرست:",
             reply_markup=ReplyKeyboardMarkup(ONLY_BACK_KEYBOARD, resize_keyboard=True)
         )
         return RESUME
-    
-    # اگر پروفایل کامل بود، خلاصه را نمایش بده
+
     resume_name = os.path.basename(user.resume_file_path) if user.resume_file_path else "ثبت شده"
     await update.message.reply_text(
         f"👤 <b>پروفایل من</b>\n\n"
@@ -352,7 +367,7 @@ def analyze_position(text: str, user: UserProfile, src: str) -> dict:
     match = []
     up = []
     reqs = ["• 📄 <b>CV</b>", "• 🎓 <b>Transcripts</b>"]
-    
+
     if any(k in l_text for k in ['بدون مدرک', 'no ielts', 'waived']):
         match.append("🗣 <b>زبان:</b> بدون مدرک زبان ✅")
     elif user.has_language_cert:
@@ -364,7 +379,7 @@ def analyze_position(text: str, user: UserProfile, src: str) -> dict:
         reqs.append("• 📝 <b>SOP / Cover Letter</b> ⭐️")
     if any(k in l_text for k in ['reference', 'recommendation']):
         reqs.append("• 📧 <b>References</b>")
-    
+
     dl = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},?\s+202[6-9]', l_text)
     deadline = dl.group(0).title() if dl else "بررسی در سایت"
 
@@ -374,14 +389,21 @@ def analyze_position(text: str, user: UserProfile, src: str) -> dict:
 async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     text = (msg.text or msg.caption or "").strip()
-    
-    if text == '📤 ارسال پوزیشن': return await prompt_send_position(update, context)
-    elif text == '💾 پوزیشن های ذخیره شده': return await show_saved_positions(update, context)
-    elif text == '✅ پوزیشن های اپلای شده': return await show_applied_positions(update, context)
-    elif text == '💬 پشتیبانی': return await msg.reply_text(f"پشتیبانی: @{SUPPORT_TELEGRAM_ID}")
-    elif "▶️" in text: return await msg.reply_text(f"کانال: {YOUTUBE_CHANNEL_URL}")
-    elif 'بهبود' in text or 'نگارش' in text: return await msg.reply_text("🚧 به‌زودی فعال می‌شود!")
-    elif text == BACK_BTN: return await show_main_menu(update, context)
+
+    if text == '📤 ارسال پوزیشن':
+        return await prompt_send_position(update, context)
+    elif text == '💾 پوزیشن های ذخیره شده':
+        return await show_saved_positions(update, context)
+    elif text == '✅ پوزیشن های اپلای شده':
+        return await show_applied_positions(update, context)
+    elif text == '💬 پشتیبانی':
+        return await msg.reply_text(f"پشتیبانی: @{SUPPORT_TELEGRAM_ID}")
+    elif text == "▶️ یوتیوب Honi's Hub":
+        return await msg.reply_text(f"کانال: {YOUTUBE_CHANNEL_URL}")
+    elif text in ['✨ بهبود رزومه (به‌زودی)', '📝 نگارش انگیزه نامه (به‌زودی)']:
+        return await msg.reply_text("🚧 به‌زودی فعال می‌شود!")
+    elif text == BACK_BTN:
+        return await show_main_menu(update, context)
 
     db = SessionLocal()
     user = db.query(UserProfile).filter(UserProfile.telegram_id == msg.from_user.id).first()
@@ -393,7 +415,6 @@ async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TY
     src = "متن / فوروارد"
     combined_text = text
 
-    # ۱. اگر عکس بود (هم متن/کپشن را می‌خواند و هم متن داخل عکس را استخراج و به آن اضافه می‌کند)
     if msg.photo:
         src = "عکس و متن" if text else "عکس"
         try:
@@ -406,14 +427,12 @@ async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             print(f"Photo download/OCR error: {e}")
 
-    # ۲. اگر لینک بود
     urls = re.findall(r'(https?://[^\s<>"]+)', combined_text)
     if len(urls) >= 1 and len(text.split()) <= 5 and not msg.photo:
         src = "لینک"
         content = await fetch_webpage_content(urls[0])
         combined_text = f"{combined_text}\n{content}".strip()
 
-    # ۳. اعتبارسنجی اینکه واقعاً پوزیشن تحصیلی است یا خیر
     if not is_academic_position(combined_text):
         await wait.delete()
         db.close()
@@ -431,7 +450,7 @@ async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TY
     )
     db.add(pos)
     db.commit()
-    
+
     rep = (
         f"📊 <b>گزارش (#{pos.id})</b> | {src}\n"
         f"🎯 <b>نتیجه:</b> {an['match']}\n━━━━━━━━━\n"
@@ -440,7 +459,7 @@ async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TY
         f"📋 <b>مدارک:</b>\n{an['r_str']}\n"
         f"⏳ <b>ددلاین:</b> {html.escape(an['dl'])}"
     )
-    
+
     btn = [[InlineKeyboardButton("🚀 اپلای", url=an['urls'][0])]] if an['urls'] else []
     btn.append([InlineKeyboardButton("💾 ذخیره", callback_data=f"save_{pos.id}"), InlineKeyboardButton("✅ انجام شد", callback_data=f"applied_{pos.id}")])
     btn.append([InlineKeyboardButton("❌ حذف", callback_data=f"delete_{pos.id}")])
@@ -458,9 +477,12 @@ async def handle_pos_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     p = db.query(Position).filter(Position.id == int(p_id)).first()
     if p:
-        if act == "save": p.status = "Saved"
-        elif act == "applied": p.status = "Applied"
-        elif act == "delete": db.delete(p)
+        if act == "save":
+            p.status = "Saved"
+        elif act == "applied":
+            p.status = "Applied"
+        elif act == "delete":
+            db.delete(p)
         db.commit()
         await q.edit_message_text(q.message.text_html + f"\n\n✅ <b>عملیات {act} انجام شد!</b>", parse_mode="HTML")
     db.close()
@@ -477,10 +499,10 @@ def main():
         .post_init(post_init_setup)
         .build()
     )
-    
+
     cv_h = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex('^👤'), check_and_handle_profile_btn),
+            MessageHandler(filters.Regex('^👤 پروفایل من$'), check_and_handle_profile_btn),
             CallbackQueryHandler(start_from_inline_edit, pattern='^edit_profile$')
         ],
         states={
@@ -502,14 +524,14 @@ def main():
         ],
         allow_reentry=True
     )
-    
+
     app.add_handler(CommandHandler('start', show_main_menu))
     app.add_handler(CommandHandler('menu', show_main_menu))
     app.add_handler(cv_h)
     app.add_handler(CallbackQueryHandler(handle_pos_btn))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION | filters.PHOTO) & ~filters.COMMAND, handle_router_message))
     app.add_error_handler(global_error_handler)
-    
+
     print("🚀 ربات در حالت Production آماده است!")
     app.run_polling(drop_pending_updates=True)
 
