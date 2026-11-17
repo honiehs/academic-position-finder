@@ -1,0 +1,13 @@
+{
+  "app": "academic-position-finder",
+  "port": 80,
+  "build": {
+    "location": "iran"
+  },
+  "disks": [
+    {
+      "name": "data",
+      "mountTo": "data" 
+    }
+  ]
+}
