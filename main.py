@@ -393,14 +393,18 @@ async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TY
     src = "متن / فوروارد"
     combined_text = text
 
-    # ۱. اگر عکس بود (اسکرین‌شات لینکدین یا پست عکس‌دار)
+    # ۱. اگر عکس بود (هم متن/کپشن را می‌خواند و هم متن داخل عکس را استخراج و به آن اضافه می‌کند)
     if msg.photo:
-        src = "عکس"
-        img_p = f"data/screenshots/{msg.from_user.id}.jpg"
-        file = await context.bot.get_file(msg.photo[-1].file_id)
-        await file.download_to_drive(img_p)
-        ocr_txt = await extract_text_from_screenshot(img_p)
-        combined_text = f"{text}\n{ocr_txt}".strip()
+        src = "عکس و متن" if text else "عکس"
+        try:
+            img_p = f"data/screenshots/{msg.from_user.id}.jpg"
+            file = await context.bot.get_file(msg.photo[-1].file_id)
+            await file.download_to_drive(img_p)
+            ocr_txt = await extract_text_from_screenshot(img_p)
+            if ocr_txt:
+                combined_text = f"{text}\n{ocr_txt}".strip()
+        except Exception as e:
+            print(f"Photo download/OCR error: {e}")
 
     # ۲. اگر لینک بود
     urls = re.findall(r'(https?://[^\s<>"]+)', combined_text)
