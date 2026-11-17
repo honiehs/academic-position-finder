@@ -1,12 +1,10 @@
 import os
 import re
 import html
-import asyncio
 import traceback
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from aiohttp import web  # اضافه شدن برای سرور مجازی Render
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, 
     InlineKeyboardButton, InlineKeyboardMarkup,
@@ -47,22 +45,6 @@ async def post_init_setup(application: Application) -> None:
     commands = [BotCommand("start", "🔄 شروع ربات / ساخت پروفایل"), BotCommand("menu", "🏠 نمایش منو اصلی")]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-
-    # راه‌اندازی سرور مجازی سبک برای تایید سلامت در پلتفرم Render
-    async def handle(request):
-        return web.Response(text="Academic Position Finder Bot is Alive and Running! 🚀")
-    
-    try:
-        webapp = web.Application()
-        webapp.router.add_get('/', handle)
-        runner = web.AppRunner(webapp)
-        await runner.setup()
-        port = int(os.environ.get("PORT", 10000))
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-        print(f"🌐 Dummy web server started on port {port}")
-    except Exception as e:
-        print(f"⚠️ Failed to start web server: {e}")
 
 def update_user_db(user_id: int, **kwargs) -> bool:
     db = SessionLocal()
