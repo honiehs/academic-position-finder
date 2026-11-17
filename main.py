@@ -50,7 +50,7 @@ COUNTRY_KEYBOARD = [
     ['🌍 کشور هدفم در لیست نیست (تایپ می‌کنم)'],
     [BACK_BTN]
 ]
-HAS_LANG_KEYBOARD = [['✅ دارم', '❌ ندارم'], [BACK_BTN]]
+HAS_LANG_KEYBOARD = [['✅ بله', '❌ خیر'], [BACK_BTN]]
 LANG_TYPE_KEYBOARD = [['🇬🇧 IELTS', '🇺🇸 TOEFL'], ['🗣 مدرک زبان دیگری دارم'], [BACK_BTN]]
 ONLY_BACK_KEYBOARD = [[BACK_BTN]]
 
@@ -194,13 +194,16 @@ async def ask_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 async def get_has_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.text == BACK_BTN: return await show_main_menu(update, context)
-    if 'دارم' in update.message.text:
+    if 'بله' in update.message.text:
         update_user_db(update.message.from_user.id, has_language_cert=True)
         await update.message.reply_text("🏅 نوع مدرک:", reply_markup=ReplyKeyboardMarkup(LANG_TYPE_KEYBOARD, resize_keyboard=True))
         return LANG_TYPE
-    else:
+    elif 'خیر' in update.message.text:
         update_user_db(update.message.from_user.id, has_language_cert=False, language_score="ندارد ❌")
         return await finish_profile(update, context)
+    else:
+        await update.message.reply_text("⚠️ لطفاً یکی از گزینه‌های «✅ بله» یا «❌ خیر» را انتخاب کن:", reply_markup=ReplyKeyboardMarkup(HAS_LANG_KEYBOARD, resize_keyboard=True))
+        return HAS_LANG
 
 async def get_lang_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.text == BACK_BTN: return await show_main_menu(update, context)
