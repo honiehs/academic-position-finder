@@ -4,6 +4,7 @@ import html
 import asyncio
 import traceback
 from datetime import datetime
+from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -107,29 +108,63 @@ def is_academic_position(text: str) -> bool:
     score = sum(1 for kw in ACADEMIC_KEYWORDS if kw in l_text)
     return score >= 2
 
+def is_general_listing_url(url: str, page_title: str = "") -> bool:
+    """تشخیص لینک‌های کلی (صفحه اصلی سایت یا لیست پوزیشن‌ها) به جای لینک مستقیم یک پوزیشن"""
+    try:
+        parsed = urlparse(url.strip())
+        path = parsed.path.strip('/').lower()
+
+        # ۱. اگر لینک صفحه اصلی سایت باشد (بدون مسیر مشخص)
+        if not path or path in ['en', 'fa', 'home', 'index.html', 'index.php']:
+            return True
+
+        # ۲. اگر مسیر لینک مربوط به صفحه جستجو یا لیست کلی پوزیشن‌ها باشد
+        generic_paths = {
+            'jobs', 'careers', 'vacancies', 'positions', 'scholarships',
+            'opportunities', 'search', 'find-a-phd', 'phd-positions',
+            'open-positions', 'all-jobs', 'listings', 'fellowships', 'grants'
+        }
+        segments = [s for s in path.split('/') if s]
+        if len(segments) == 1 and segments[0] in generic_paths:
+            return True
+
+        # ۳. بررسی عنوان صفحه برای عبارات موتور جستجو و پورتال‌های کلی
+        l_title = (page_title or "").lower()
+        portal_phrases = [
+            'search engine', 'global opportunity', 'find scholarships',
+            'all scholarships', 'job board', 'browse jobs', 'open positions list'
+        ]
+        if any(p in l_title for p in portal_phrases):
+            return True
+    except Exception:
+        pass
+    return False
+
 def extract_position_title(text: str) -> str:
-    """استخراج نام کامل موقعیت تحصیلی از متن آگهی"""
+    """استخراج نام واقعی پوزیشن از ابتدای پیام یا عنوان صفحه وب"""
     if not text:
         return "موقعیت تحصیلی"
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    title_keywords = [
-        'phd', 'ph.d', 'master', 'msc', 'postdoc', 'doctoral', 'scholarship',
-        'fellowship', 'position', 'research', 'hiring', 'vacancy',
-        'دکتری', 'دکترا', 'ارشد', 'پست داک', 'پست‌داک', 'بورسیه', 'پوزیشن', 'فاند', 'استاد'
-    ]
-    candidates = []
-    for line in lines:
+
+    bullet_prefixes = ('•', '-', '*', '▪', '▫', '🔹', '🔸', '✅', '❌', '✔', '1.', '2.', '3.')
+    skip_phrases = ['مدرک کارشناسی', 'مدارک مورد نیاز', 'شرایط اپلای', 'نحوه اپلای', 'لینک اپلای', 'requirements', 'how to apply']
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
         if line.startswith("http") or line.startswith("@") or line.startswith("#"):
             continue
+        if line.startswith(bullet_prefixes):
+            continue
+
         clean_line = re.sub(r'https?://\S+', '', line).strip()
         if len(clean_line) < 6:
             continue
-        candidates.append(clean_line)
-        if any(k in clean_line.lower() for k in title_keywords):
-            return clean_line[:120] + ("..." if len(clean_line) > 120 else "")
-    if candidates:
-        first = candidates[0]
-        return first[:120] + ("..." if len(first) > 120 else "")
+        if any(p in clean_line.lower() for p in skip_phrases):
+            continue
+
+        return clean_line[:110] + ("..." if len(clean_line) > 110 else "")
+
     return "موقعیت تحصیلی"
 
 def extract_resume_text(file_path: str) -> str:
@@ -204,7 +239,6 @@ def extract_telegram_urls(msg) -> list:
     return urls
 
 def is_same_ad(group: dict, item: dict) -> bool:
-    """تشخیص اینکه دو پیام پشت سر هم مربوط به یک آگهی هستند یا دو آگهی مجزا"""
     if group['media_group_id'] and item['media_group_id'] and group['media_group_id'] == item['media_group_id']:
         return True
     if group['urls'] and item['urls'] and (group['urls'] & item['urls']):
@@ -317,7 +351,6 @@ def analyze_position(text: str, user: UserProfile) -> dict:
     }
 
 def build_position_buttons(pos_id: int, best_url: str, include_save: bool = True) -> InlineKeyboardMarkup:
-    """ساخت دکمه‌های شیشه‌ای یکسان برای گزارش پوزیشن و لیست ذخیره شده‌ها"""
     btn = []
     if best_url and best_url.startswith("http"):
         btn.append([InlineKeyboardButton("🚀 لینک اپلای پوزیشن", url=best_url)])
@@ -606,19 +639,23 @@ async def show_applied_positions(update: Update, context: ContextTypes.DEFAULT_T
     db.close()
     await update.message.reply_text("✅ <b>پوزیشن‌های اپلای شده:</b>\n\n" + "\n\n".join(lines), parse_mode="HTML")
 
-async def fetch_webpage_content(url: str) -> str:
+async def fetch_webpage_content(url: str):
+    """دریافت عنوان و متن صفحه وب به صورت (page_title, full_text)"""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, headers=headers) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
-                return ""
+                return "", ""
             soup = BeautifulSoup(resp.text, 'html.parser')
             for tag in soup(["script", "style", "nav", "footer"]):
                 tag.extract()
-            return f"{soup.title.string if soup.title else ''}\n{soup.get_text(separator=' ', strip=True)[:4000]}"
+            h1 = soup.find("h1")
+            page_title = (h1.get_text(strip=True) if h1 else (soup.title.string.strip() if soup.title and soup.title.string else ""))
+            body_text = soup.get_text(separator=' ', strip=True)[:4000]
+            return page_title, f"{page_title}\n{body_text}"
     except Exception:
-        return ""
+        return "", ""
 
 async def extract_text_from_screenshot(file_path: str) -> str:
     try:
@@ -636,7 +673,6 @@ async def extract_text_from_screenshot(file_path: str) -> str:
     return ""
 
 async def process_batch_after_delay(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """جمع‌آوری پیام‌های فورواردی، ادغام پیام‌های مربوط به یک آگهی، و ارسال گزارش مجزا برای هر آگهی متفاوت"""
     try:
         await asyncio.sleep(2.5)
     except asyncio.CancelledError:
@@ -661,6 +697,8 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
     )
 
     extracted_items = []
+    general_url_detected = False
+
     for idx, msg in enumerate(messages, start=1):
         text = (msg.text or msg.caption or "").strip()
         hidden_urls = extract_telegram_urls(msg)
@@ -682,8 +720,14 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
 
         urls = list(dict.fromkeys([u.rstrip(').,;:]') for u in re.findall(r'(https?://[^\s<>"]+)', combined_text)]))
         if len(urls) >= 1 and len(text.split()) <= 5 and not msg.photo:
-            content = await fetch_webpage_content(urls[0])
-            combined_text = f"{combined_text}\n{content}".strip()
+            if is_general_listing_url(urls[0]):
+                general_url_detected = True
+                continue
+            page_title, content = await fetch_webpage_content(urls[0])
+            if is_general_listing_url(urls[0], page_title):
+                general_url_detected = True
+                continue
+            combined_text = f"{content}\n{combined_text}".strip()
 
         extracted_items.append({
             "text": combined_text,
@@ -738,7 +782,14 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
 
     await wait.delete()
 
-    if valid_sent == 0:
+    if general_url_detected and valid_sent == 0:
+        await context.bot.send_message(
+            chat_id,
+            "⚠️ <b>این لینک مربوط به صفحه اصلی یا لیست کلی پوزیشن‌هاست!</b>\n\n"
+            "لطفاً وارد صفحه خود پوزیشن مورد نظرت شو و <b>لینک مستقیم همان یک پوزیشن</b> را برایم بفرست تا دقیق تحلیلش کنم. 🎯",
+            parse_mode="HTML"
+        )
+    elif valid_sent == 0:
         await context.bot.send_message(
             chat_id,
             "⚠️ لطفاً پیام ارسالی را مجدداً بررسی کنید و فقط پوزیشن اپلای تحصیلی را ارسال کنید:"
@@ -757,9 +808,15 @@ async def handle_router_message(update: Update, context: ContextTypes.DEFAULT_TY
     elif text == '✅ پوزیشن های اپلای شده':
         return await show_applied_positions(update, context)
     elif text == '💬 پشتیبانی':
-        return await msg.reply_text(f"پشتیبانی: @{SUPPORT_TELEGRAM_ID}")
+        return await msg.reply_text(
+            "💬 برای ارتباط با پشتیبانی و طرح سوالات، روی دکمه زیر کلیک کنید:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 ارتباط با پشتیبانی", url=f"https://t.me/{SUPPORT_TELEGRAM_ID}")]])
+        )
     elif text == "▶️ یوتیوب Honi's Hub":
-        return await msg.reply_text(f"کانال: {YOUTUBE_CHANNEL_URL}")
+        return await msg.reply_text(
+            "▶️ برای مشاهده ویدیوهای آموزشی اپلای و بورسیه، وارد کانال یوتیوب شوید:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ ورود به کانال یوتیوب", url=YOUTUBE_CHANNEL_URL)]])
+        )
     elif text in ['✨ بهبود رزومه (به‌زودی)', '📝 نگارش انگیزه نامه (به‌زودی)']:
         return await msg.reply_text("🚧 به‌زودی فعال می‌شود!")
     elif text == BACK_BTN:
