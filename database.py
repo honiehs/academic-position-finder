@@ -19,6 +19,7 @@ class UserProfile(Base):
     has_language_cert = Column(Boolean)
     language_score = Column(String)
     positions = relationship("Position", back_populates="user")
+    language = Column(String, nullable=True)  # 'fa' or 'en'
 
 class Position(Base):
     __tablename__ = 'positions'
@@ -42,4 +43,10 @@ def init_db():
             conn.execute(text("DROP TABLE IF EXISTS positions"))
             conn.commit()
     Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE user_profiles ADD COLUMN language VARCHAR"))
+            conn.commit()
+        except Exception:
+            pass
     print("✅ دیتابیس با موفقیت آماده شد!")
