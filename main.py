@@ -643,17 +643,15 @@ async def show_saved_positions(update: Update, context: ContextTypes.DEFAULT_TYP
     for p in saved:
         if p.raw_text:
             an = analyze_position(p.raw_text, user, lang)
-            title, deadline_line, details_str = an['title'], an['deadline_line'], an['details_str']
+            deadline_line, details_str = an['deadline_line'], an['details_str']
             link = p.extracted_link or an['best_url']
         else:
-            title = "Academic Position" if lang == 'en' else "موقعیت تحصیلی"
             deadline_line = f"⏳ {html.escape(p.deadline or '-')}"
             details_str = p.requirements or ""
             link = p.extracted_link or ""
 
         text_msg = (
             f"{t(lang, 'pos_num', id=p.id)}\n"
-            f"🏷 <b>{html.escape(title)}</b>\n"
             f"{deadline_line}\n\n"
             f"{details_str}"
         )
@@ -809,8 +807,7 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
             f"{t(lang, 'report_header')}\n"
             f"{an['status_line']}\n"
             f"{an['deadline_line']}\n\n"
-            f"{t(lang, 'pos_num', id=pos.id)}\n"
-            f"🏷 <b>{html.escape(an['title'])}</b>\n\n"
+            f"{t(lang, 'pos_num', id=pos.id)}\n\n"
             f"{an['details_str']}"
         )
 
