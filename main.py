@@ -1,8 +1,10 @@
 import os
 import re
 import html
+import zipfile
 import asyncio
 import traceback
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from urllib.parse import urlparse
 import httpx
@@ -51,6 +53,29 @@ ACADEMIC_KEYWORDS = [
     'بورسیه', 'پوزیشن', 'اپلای', 'دانشگاه', 'استاد', 'ددلاین', 'پذیرش', 'تحصیلی', 'پژوهشی'
 ]
 
+# Bilingual skill map: canonical_name -> [English & Persian variants]
+BILINGUAL_SKILLS = {
+    'Python': ['python', 'پایتون'],
+    'Java': ['java', 'جاوا'],
+    'SQL': ['sql', 'اس کیو ال', 'پایگاه داده', 'دیتابیس'],
+    'Flutter': ['flutter', 'فلاتر'],
+    'Dart': ['dart', 'دارت'],
+    'Machine Learning': ['machine learning', 'یادگیری ماشین'],
+    'Deep Learning': ['deep learning', 'یادگیری عمیق'],
+    'AI': ['artificial intelligence', 'هوش مصنوعی'],
+    'NLP': ['nlp', 'natural language processing', 'پردازش زبان طبیعی'],
+    'Data Analysis': ['data analysis', 'data analytics', 'تحلیل داده', 'داده کاوی', 'داده‌کاوی'],
+    'Cloud': ['cloud', 'رایانش ابری', 'ابر'],
+    'Docker': ['docker', 'داکر'],
+    'Git': ['git', 'گیت', 'گیت‌هاب', 'گیت هاب'],
+    'C++': ['c++', 'سی پلاس پلاس'],
+    'MATLAB': ['matlab', 'متلب'],
+    'BI': ['power bi', 'business intelligence', 'هوش تجاری'],
+    'ERP': ['erp', 'برنامه‌ریزی منابع سازمانی'],
+    'Agile/Scrum': ['agile', 'scrum', 'اجایل', 'اسکرام'],
+    'Software Engineering': ['software engineering', 'مهندسی نرم‌افزار', 'مهندسی نرم افزار'],
+}
+
 PENDING_BATCHES = {}
 BATCH_TASKS = {}
 
@@ -85,7 +110,8 @@ def update_user_db(user_id: int, **kwargs) -> bool:
             setattr(user, k, v)
         db.commit()
         return True
-    except Exception:
+    except Exception as e:
+        print(f"update_user_db error: {e}")
         db.rollback()
         return False
     finally:
@@ -144,13 +170,26 @@ def extract_position_title(text: str, lang: str = 'fa') -> str:
     return default_title
 
 def extract_resume_text(file_path: str) -> str:
+    """استخراج متن رزومه فارسی یا انگلیسی از فایل‌های PDF و DOCX"""
     if not file_path or not os.path.exists(file_path):
         return ""
-    if file_path.lower().endswith(".pdf") and HAS_PYPDF:
+    lower_path = file_path.lower()
+    if lower_path.endswith(".pdf") and HAS_PYPDF:
         try:
             reader = PdfReader(file_path)
             return "\n".join(page.extract_text() or "" for page in reader.pages).lower()
-        except Exception:
+        except Exception as e:
+            print(f"PDF read error: {e}")
+            return ""
+    elif lower_path.endswith(".docx"):
+        try:
+            with zipfile.ZipFile(file_path) as z:
+                xml_content = z.read("word/document.xml")
+            tree = ET.fromstring(xml_content)
+            texts = [elem.text for elem in tree.iter() if elem.text]
+            return " ".join(texts).lower()
+        except Exception as e:
+            print(f"DOCX read error: {e}")
             return ""
     return ""
 
@@ -300,10 +339,14 @@ def analyze_position(text: str, user: UserProfile, lang: str = 'fa') -> dict:
         else:
             details.append(f"📚 <b>رشته تحصیلی:</b> کلیدواژه‌های رشته شما ({html.escape(user_field)}) در متن این پوزیشن پیدا نشد ❌")
 
-    # 3. Resume skills
+    # 3. Bilingual Resume skills match (supports Persian & English CVs)
     if resume_text:
-        tech_skills = ['python', 'java', 'sql', 'flutter', 'dart', 'machine learning', 'deep learning', 'nlp', 'data analysis', 'cloud', 'docker', 'git', 'c++', 'matlab', 'bi', 'erp', 'agile', 'scrum', 'fuzzy']
-        shared_skills = [sk for sk in tech_skills if sk in resume_text and sk in l_text]
+        shared_skills = []
+        for skill_name, variants in BILINGUAL_SKILLS.items():
+            in_cv = any(v in resume_text for v in variants)
+            in_pos = any(v in l_text for v in variants)
+            if in_cv and in_pos:
+                shared_skills.append(skill_name)
         if shared_skills:
             match_count += 1
             if lang == 'en':
@@ -427,6 +470,14 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, lan
     )
     return ConversationHandler.END
 
+async def _download_resume_bg(bot, file_id: str, file_path: str):
+    """دانلود رزومه در پس‌زمینه تا ربات بدون تاخیر به کاربر پاسخ دهد"""
+    try:
+        file = await bot.get_file(file_id)
+        await file.download_to_drive(file_path)
+    except Exception as e:
+        print(f"Background resume download error: {e}")
+
 async def get_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     lang = get_user_lang(update.effective_user.id)
     if update.message.text and is_back(update.message.text.strip()):
@@ -438,23 +489,18 @@ async def get_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return RESUME
 
-    wait_msg = await update.message.reply_text(t(lang, 'receiving_resume'))
     doc = update.message.document
     user_id = update.message.from_user.id
     safe_filename = re.sub(r'[^\w\.-]', '_', doc.file_name or "resume.pdf")
     file_path = f"data/resumes/{user_id}_{safe_filename}"
 
     if not update_user_db(user_id, resume_file_id=doc.file_id, resume_file_path=file_path):
-        await wait_msg.edit_text(t(lang, 'save_error'))
+        await update.message.reply_text(t(lang, 'save_error'))
         return RESUME
 
-    try:
-        file = await context.bot.get_file(doc.file_id)
-        await file.download_to_drive(file_path)
-    except Exception:
-        pass
+    # دانلود در پس‌زمینه (بدون معطل کردن کاربر و بدون خطای تایم‌اوت)
+    asyncio.create_task(_download_resume_bg(context.bot, doc.file_id, file_path))
 
-    await wait_msg.delete()
     await update.message.reply_text(
         t(lang, 'ask_degree'),
         reply_markup=ReplyKeyboardMarkup(get_degree_kb(lang), resize_keyboard=True)
@@ -682,7 +728,7 @@ async def show_applied_positions(update: Update, context: ContextTypes.DEFAULT_T
 async def fetch_webpage_content(url: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, headers=headers) as client:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers=headers) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return "", ""
@@ -698,7 +744,7 @@ async def fetch_webpage_content(url: str):
 
 async def extract_text_from_screenshot(file_path: str) -> str:
     try:
-        async with httpx.AsyncClient(timeout=18.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             with open(file_path, "rb") as f:
                 resp = await client.post(
                     "https://api.ocr.space/parse/image",
@@ -713,7 +759,7 @@ async def extract_text_from_screenshot(file_path: str) -> str:
 
 async def process_batch_after_delay(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(1.2)
     except asyncio.CancelledError:
         return
 
@@ -820,7 +866,10 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
         )
         valid_sent += 1
 
-    await wait.delete()
+    try:
+        await wait.delete()
+    except Exception:
+        pass
 
     if general_url_detected and valid_sent == 0:
         await context.bot.send_message(chat_id, t(lang, 'general_url_err'), parse_mode="HTML")
