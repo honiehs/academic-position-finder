@@ -119,6 +119,7 @@ def extract_resume_text(file_path: str) -> str:
     return ""
 
 def parse_deadline(text: str):
+    """بازگرداندن (متن ددلاین، آیا گذشته است، آیا نزدیک است)"""
     l_text = text.lower()
     months = {
         'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
@@ -127,26 +128,38 @@ def parse_deadline(text: str):
         'october': 10, 'oct': 10, 'november': 11, 'nov': 11, 'december': 12, 'dec': 12
     }
     month_pattern = "|".join(months.keys())
+    now = datetime.now()
+
+    def evaluate_date(dt: datetime, label: str):
+        is_expired = dt < now
+        is_near = (not is_expired) and ((dt - now).days <= 14)
+        return label, is_expired, is_near
 
     m1 = re.search(rf'({month_pattern})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(202[4-9])', l_text)
     if m1:
-        dt = datetime(int(m1.group(3)), months[m1.group(1)], int(m1.group(2)))
-        return m1.group(0).title(), dt < datetime.now()
+        try:
+            dt = datetime(int(m1.group(3)), months[m1.group(1)], int(m1.group(2)))
+            return evaluate_date(dt, m1.group(0).title())
+        except ValueError:
+            pass
 
     m2 = re.search(rf'(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pattern})\.?,?\s+(202[4-9])', l_text)
     if m2:
-        dt = datetime(int(m2.group(3)), months[m2.group(2)], int(m2.group(1)))
-        return m2.group(0).title(), dt < datetime.now()
+        try:
+            dt = datetime(int(m2.group(3)), months[m2.group(2)], int(m2.group(1)))
+            return evaluate_date(dt, m2.group(0).title())
+        except ValueError:
+            pass
 
     m3 = re.search(r'(202[4-9])[-/](\d{1,2})[-/](\d{1,2})', l_text)
     if m3:
         try:
             dt = datetime(int(m3.group(1)), int(m3.group(2)), int(m3.group(3)))
-            return m3.group(0), dt < datetime.now()
+            return evaluate_date(dt, m3.group(0))
         except ValueError:
             pass
 
-    return "نامشخص (بررسی در سایت)", False
+    return None, False, False
 
 def pick_best_apply_url(urls: list) -> str:
     if not urls:
@@ -165,18 +178,43 @@ def extract_telegram_urls(msg) -> list:
             urls.append(ent.url)
     return urls
 
-def analyze_position(text: str, user: UserProfile, src: str) -> dict:
+def is_same_ad(group: dict, item: dict) -> bool:
+    """تشخیص اینکه دو پیام پشت سر هم مربوط به یک آگهی هستند یا دو آگهی مجزا"""
+    # ۱. اگر هر دو عضو یک آلبوم تلگرام باشند
+    if group['media_group_id'] and item['media_group_id'] and group['media_group_id'] == item['media_group_id']:
+        return True
+
+    # ۲. اگر لینک مشترک داشته باشند
+    if group['urls'] and item['urls'] and (group['urls'] & item['urls']):
+        return True
+
+    # ۳. اگر یکی از پیام‌ها مکمل باشد (مثلاً فقط لینک یا عکس بدون متن کامل آگهی)
+    if (not item['is_complete_ad']) or (not group['is_complete_ad']):
+        return True
+
+    # ۴. بررسی هم‌پوشانی کلمات کلیدی متن
+    w1 = set(re.findall(r'[a-zA-Z0-9\u0600-\u06FF]{4,}', group['text'].lower()))
+    w2 = set(re.findall(r'[a-zA-Z0-9\u0600-\u06FF]{4,}', item['text'].lower()))
+    if w1 and w2:
+        overlap = len(w1 & w2) / min(len(w1), len(w2))
+        if overlap >= 0.45:
+            return True
+
+    return False
+
+def analyze_position(text: str, user: UserProfile) -> dict:
     urls = list(dict.fromkeys([u.rstrip(').,;:]') for u in re.findall(r'(https?://[^\s<>"]+)', text)]))
     best_url = pick_best_apply_url(urls)
     l_text = text.lower()
     resume_text = extract_resume_text(user.resume_file_path)
 
-    matches = []
-    mismatches = []
+    details = []
+    match_count = 0
     reqs = ["• 📄 <b>CV / Resume</b>", "• 🎓 <b>Transcripts</b>"]
 
-    deadline_str, is_expired = parse_deadline(text)
+    deadline_str, is_expired, is_near = parse_deadline(text)
 
+    # ۱. مقطع تحصیلی
     degree_map = {
         'دکتری': ['phd', 'ph.d', 'doctoral', 'doctorate', 'دکتری', 'دکترا'],
         'کارشناسی ارشد': ['master', 'msc', 'm.sc', 'ارشد', 'کارشناسی ارشد'],
@@ -187,10 +225,12 @@ def analyze_position(text: str, user: UserProfile, src: str) -> dict:
     user_deg = (user.target_degrees or "").strip()
     if pos_degrees:
         if user_deg in pos_degrees:
-            matches.append(f"🎓 <b>مقطع تحصیلی:</b> با هدف شما ({html.escape(user_deg)}) کاملاً مطابقت دارد ✅")
+            match_count += 1
+            details.append(f"🎓 <b>مقطع تحصیلی:</b> با هدف شما ({html.escape(user_deg)}) کاملاً مطابقت دارد ✅")
         else:
-            mismatches.append(f"🎓 <b>عدم تطابق مقطع:</b> این پوزیشن برای {' / '.join(pos_degrees)} است، اما مقطع هدف شما «{html.escape(user_deg)}» ثبت شده است ❌")
+            details.append(f"🎓 <b>مقطع تحصیلی:</b> این پوزیشن برای {' / '.join(pos_degrees)} است و با هدف شما ({html.escape(user_deg)}) همخوانی ندارد ❌")
 
+    # ۲. رشته تحصیلی
     field_keywords = {
         'کامپیوتر': ['computer', 'software', 'ai', 'artificial intelligence', 'machine learning', 'data', 'cyber', 'computing', 'کامپیوتر', 'نرم‌افزار', 'نرم افزار', 'هوش مصنوعی'],
         'علوم داده': ['data', 'machine learning', 'ai', 'analytics', 'deep learning', 'علوم داده', 'هوش مصنوعی'],
@@ -209,23 +249,30 @@ def analyze_position(text: str, user: UserProfile, src: str) -> dict:
             break
 
     if matched_field_kws:
-        matches.append(f"📚 <b>رشته تحصیلی:</b> مرتبط با حوزه «{html.escape(user_field)}» ({', '.join(matched_field_kws[:3])}) ✅")
+        match_count += 1
+        details.append(f"📚 <b>رشته تحصیلی:</b> مرتبط با حوزه «{html.escape(user_field)}» ({', '.join(matched_field_kws[:3])}) ✅")
     else:
-        mismatches.append(f"📚 <b>عدم تطابق رشته:</b> کلیدواژه‌های رشته شما ({html.escape(user_field)}) در متن این پوزیشن پیدا نشد ⚠️")
+        details.append(f"📚 <b>رشته تحصیلی:</b> کلیدواژه‌های رشته شما ({html.escape(user_field)}) در متن این پوزیشن پیدا نشد ⚠️")
 
+    # ۳. تطابق با رزومه
     if resume_text:
         tech_skills = ['python', 'java', 'sql', 'flutter', 'dart', 'machine learning', 'deep learning', 'nlp', 'data analysis', 'cloud', 'docker', 'git', 'c++', 'matlab', 'bi', 'erp', 'agile', 'scrum', 'fuzzy']
         shared_skills = [sk for sk in tech_skills if sk in resume_text and sk in l_text]
         if shared_skills:
-            matches.append(f"📄 <b>تطابق با رزومه:</b> مهارت‌های مشترک ({', '.join(shared_skills[:5])}) در رزومه‌ات وجود دارد ✅")
+            match_count += 1
+            details.append(f"📄 <b>تطابق با رزومه:</b> مهارت‌های مشترک ({', '.join(shared_skills[:5])}) در رزومه‌ات وجود دارد ✅")
 
+    # ۴. مدرک زبان
     if any(k in l_text for k in ['بدون مدرک', 'no ielts', 'waived', 'without ielts']):
-        matches.append("🗣 <b>مدرک زبان:</b> بدون نیاز به مدرک زبان ✅")
+        match_count += 1
+        details.append("🗣 <b>مدرک زبان:</b> بدون نیاز به مدرک زبان ✅")
     elif user.has_language_cert:
-        matches.append(f"🗣 <b>مدرک زبان:</b> دارای مدرک ({html.escape(user.language_score or '')}) ✅")
+        match_count += 1
+        details.append(f"🗣 <b>مدرک زبان:</b> دارای مدرک ({html.escape(user.language_score or '')}) ✅")
     else:
-        mismatches.append("🗣 <b>مدرک زبان:</b> پروفایل شما فاقد مدرک IELTS/TOEFL است و احتمالاً برای اپلای نیاز خواهد بود ❌")
+        details.append("🗣 <b>مدرک زبان:</b> پروفایل شما فاقد مدرک IELTS/TOEFL است و احتمالاً برای اپلای نیاز خواهد بود ❌")
 
+    # مدارک احتمالی برای ذخیره در دیتابیس
     if any(k in l_text for k in ['sop', 'cover letter', 'motivation letter', 'انگیزه نامه', 'انگیزه‌نامه']):
         reqs.append("• 📝 <b>SOP / Cover Letter</b> ⭐️")
     if any(k in l_text for k in ['reference', 'recommendation', 'توصیه نامه', 'توصیه‌نامه']):
@@ -233,26 +280,44 @@ def analyze_position(text: str, user: UserProfile, src: str) -> dict:
     if any(k in l_text for k in ['research proposal', 'پروپوزال']):
         reqs.append("• 📑 <b>Research Proposal</b>")
 
-    is_eligible = (not is_expired) and (len(matches) >= 1)
+    is_eligible = (not is_expired) and (match_count >= 1)
+
     if is_expired:
-        status = "🔴 منقضی شده (ددلاین گذشته است)"
-    elif len(mismatches) == 0 and len(matches) >= 2:
-        status = "🟢 بسیار مناسب و منطبق با پروفایل شما ✨"
-    elif is_eligible:
-        status = "🟡 قابل اپلای (با بررسی موارد نیازمند توجه)"
+        status_line = "❌ غیرقابل اپلای (ددلاین گذشته است)"
+        deadline_line = f"❌ متاسفانه ددلاین اپلای این پوزیشن گذشته است ({html.escape(deadline_str)})"
     else:
-        status = "🔴 نامناسب با پروفایل فعلی"
+        status_line = "✅ قابل اپلای برای شما" if is_eligible else "⚠️ نیازمند بررسی بیشتر (عدم تطابق با پروفایل)"
+        if deadline_str:
+            if is_near:
+                deadline_line = f"⚠️ ⏳ ددلاین دارد ({html.escape(deadline_str)}) — ددلاین نزدیک است!"
+            else:
+                deadline_line = f"⏳ ددلاین دارد ({html.escape(deadline_str)})"
+        else:
+            deadline_line = "⏳ ددلاین: نامشخص (بررسی در سایت)"
 
     return {
         "best_url": best_url,
-        "status": status,
-        "is_eligible": is_eligible,
-        "is_expired": is_expired,
-        "m_str": "\n".join(matches) if matches else "• مورد منطبق مشخصی یافت نشد.",
-        "u_str": "\n".join(mismatches) if mismatches else "• عدم تطابق خاصی مشاهده نشد ✅",
+        "status_line": status_line,
+        "deadline_line": deadline_line,
+        "details_str": "\n\n".join(details),
         "r_str": "\n".join(reqs),
-        "dl": deadline_str
+        "dl": deadline_str or "نامشخص (بررسی در سایت)"
     }
+
+def build_position_buttons(pos_id: int, best_url: str) -> InlineKeyboardMarkup:
+    """ساخت دکمه‌های شیشه‌ای یکسان برای همه پیام‌های گزارش پوزیشن"""
+    btn = []
+    if best_url and best_url.startswith("http"):
+        btn.append([InlineKeyboardButton("🚀 لینک اپلای پوزیشن", url=best_url)])
+    else:
+        btn.append([InlineKeyboardButton("🚫 لینک در دسترس نیست", callback_data="no_link")])
+
+    btn.append([
+        InlineKeyboardButton("✅ اپلای کردم", callback_data=f"applied_{pos_id}"),
+        InlineKeyboardButton("💾 ذخیرش کن", callback_data=f"save_{pos_id}")
+    ])
+    btn.append([InlineKeyboardButton("🗑 حذف پوزیشن", callback_data=f"delete_{pos_id}")])
+    return InlineKeyboardMarkup(btn)
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
@@ -421,8 +486,8 @@ async def finish_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def prompt_send_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📎 <b>پوزیشن‌های تحصیلی را ارسال یا فوروارد کنید</b> 👇\n\n"
-        "• می‌توانید چند پوزیشن را هم‌زمان فوروارد کنید تا همه با هم بررسی شوند\n"
-        "• متن کپی‌شده، عکس/اسکرین‌شات یا لینک مستقیم هم پشتیبانی می‌شود",
+        "• می‌توانید چند پیام را هم‌زمان فوروارد کنید\n"
+        "• متن کپی‌شده، عکس/اسکرین‌شات یا لینک مستقیم پشتیبانی می‌شود",
         reply_markup=ReplyKeyboardMarkup(MAIN_MENU_KEYBOARD, resize_keyboard=True),
         parse_mode="HTML"
     )
@@ -471,9 +536,20 @@ async def show_saved_positions(update: Update, context: ContextTypes.DEFAULT_TYP
     if not saved:
         return await update.message.reply_text("📭 هیچ پوزیشنی ذخیره نکردی!")
     for p in saved:
-        btn = [[InlineKeyboardButton("🚀 لینک اپلای پوزیشن", url=p.extracted_link)]] if p.extracted_link and p.extracted_link.startswith("http") else []
-        btn.append([InlineKeyboardButton("✅ اپلای کردم", callback_data=f"applied_{p.id}"), InlineKeyboardButton("🗑 حذف", callback_data=f"delete_{p.id}")])
-        await update.message.reply_text(f"📌 <b>#{p.id}</b> | ⏳ {html.escape(p.deadline or '')}\n{p.requirements}", reply_markup=InlineKeyboardMarkup(btn), parse_mode="HTML")
+        btn = []
+        if p.extracted_link and p.extracted_link.startswith("http"):
+            btn.append([InlineKeyboardButton("🚀 لینک اپلای پوزیشن", url=p.extracted_link)])
+        else:
+            btn.append([InlineKeyboardButton("🚫 لینک در دسترس نیست", callback_data="no_link")])
+        btn.append([
+            InlineKeyboardButton("✅ اپلای کردم", callback_data=f"applied_{p.id}"),
+            InlineKeyboardButton("🗑 حذف پوزیشن", callback_data=f"delete_{p.id}")
+        ])
+        await update.message.reply_text(
+            f"📌 <b>پوزیشن #{p.id}</b>\n⏳ <b>ددلاین:</b> {html.escape(p.deadline or 'نامشخص')}\n\n{p.requirements}",
+            reply_markup=InlineKeyboardMarkup(btn),
+            parse_mode="HTML"
+        )
 
 async def show_applied_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
@@ -485,7 +561,7 @@ async def show_applied_positions(update: Update, context: ContextTypes.DEFAULT_T
     db.close()
     if not applied:
         return await update.message.reply_text("📭 لیست اپلای شده‌ها خالیست!")
-    msg = "✅ <b>اپلای شده‌ها:</b>\n" + "\n".join([f"🎓 #{p.id} | ⏳ {html.escape(p.deadline or '')}" for p in applied])
+    msg = "✅ <b>پوزیشن‌های اپلای شده:</b>\n\n" + "\n".join([f"🎓 پوزیشن #{p.id} | ⏳ {html.escape(p.deadline or 'نامشخص')}" for p in applied])
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def fetch_webpage_content(url: str) -> str:
@@ -518,6 +594,7 @@ async def extract_text_from_screenshot(file_path: str) -> str:
     return ""
 
 async def process_batch_after_delay(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """جمع‌آوری پیام‌های فورواردی، ادغام پیام‌های مربوط به یک آگهی، و ارسال گزارش مجزا برای هر آگهی متفاوت"""
     try:
         await asyncio.sleep(2.5)
     except asyncio.CancelledError:
@@ -538,27 +615,20 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
     total = len(messages)
     wait = await context.bot.send_message(
         chat_id,
-        f"⏳ در حال بررسی و تحلیل دقیق {total} پیام ارسالی..." if total > 1 else "⏳ در حال بررسی و تحلیل دقیق پوزیشن..."
+        f"⏳ در حال بررسی و تحلیل {total} پیام ارسالی..." if total > 1 else "⏳ در حال بررسی و تحلیل پوزیشن..."
     )
 
-    eligible_count = 0
-    expired_count = 0
-    invalid_count = 0
-
-    batch_blocks = []
-    batch_buttons = []
-
+    # مرحله ۱: استخراج محتوای هر پیام (متن، لینک مخفی، عکس، صفحه وب)
+    extracted_items = []
     for idx, msg in enumerate(messages, start=1):
         text = (msg.text or msg.caption or "").strip()
         hidden_urls = extract_telegram_urls(msg)
-        src = "متن / فوروارد"
         combined_text = text
 
         if hidden_urls:
             combined_text = f"{combined_text}\n" + "\n".join(hidden_urls)
 
         if msg.photo:
-            src = "عکس و متن" if text else "عکس"
             try:
                 img_p = f"data/screenshots/{user_id}_{idx}.jpg"
                 file = await context.bot.get_file(msg.photo[-1].file_id)
@@ -569,33 +639,39 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
             except Exception as e:
                 print(f"Photo download/OCR error: {e}")
 
-        urls = re.findall(r'(https?://[^\s<>"]+)', combined_text)
+        urls = list(dict.fromkeys([u.rstrip(').,;:]') for u in re.findall(r'(https?://[^\s<>"]+)', combined_text)]))
         if len(urls) >= 1 and len(text.split()) <= 5 and not msg.photo:
-            src = "لینک"
             content = await fetch_webpage_content(urls[0])
             combined_text = f"{combined_text}\n{content}".strip()
 
-        if not is_academic_position(combined_text):
-            invalid_count += 1
-            if total == 1:
-                await wait.delete()
-                db.close()
-                await context.bot.send_message(
-                    chat_id,
-                    "⚠️ لطفاً پیام ارسالی را مجدداً بررسی کنید و فقط پوزیشن اپلای تحصیلی را ارسال کنید:"
-                )
-                return
+        extracted_items.append({
+            "text": combined_text,
+            "urls": set(urls),
+            "media_group_id": msg.media_group_id,
+            "is_complete_ad": is_academic_position(combined_text)
+        })
+
+    # مرحله ۲: گروه‌بندی پیام‌هایی که مربوط به یک آگهی واحد هستند
+    ad_groups = []
+    for item in extracted_items:
+        if ad_groups and is_same_ad(ad_groups[-1], item):
+            ad_groups[-1]['text'] = f"{ad_groups[-1]['text']}\n\n{item['text']}".strip()
+            ad_groups[-1]['urls'].update(item['urls'])
+            ad_groups[-1]['is_complete_ad'] = ad_groups[-1]['is_complete_ad'] or item['is_complete_ad']
+        else:
+            ad_groups.append(item)
+
+    # مرحله ۳: تحلیل و ارسال یک گزارش یکپارچه برای هر آگهی معتبر
+    valid_sent = 0
+    for grp in ad_groups:
+        full_text = grp['text']
+        if not is_academic_position(full_text):
             continue
 
-        an = analyze_position(combined_text, user, src)
-        if an['is_expired']:
-            expired_count += 1
-        elif an['is_eligible']:
-            eligible_count += 1
-
+        an = analyze_position(full_text, user)
         pos = Position(
             user_id=user.id,
-            raw_text=combined_text[:3000],
+            raw_text=full_text[:3000],
             extracted_link=an['best_url'],
             requirements=an['r_str'],
             deadline=an['dl']
@@ -603,80 +679,30 @@ async def process_batch_after_delay(user_id: int, chat_id: int, context: Context
         db.add(pos)
         db.commit()
 
-        dl_line = (
-            f"⏳ <b>ددلاین:</b> {html.escape(an['dl'])} — ⚠️ <b>متاسفانه ددلاین اپلای این پوزیشن گذشته است!</b>"
-            if an['is_expired']
-            else f"⏳ <b>ددلاین:</b> {html.escape(an['dl'])}"
+        rep = (
+            f"📊 <b>گزارش یکپارچه پوزیشن تحصیلی</b>\n"
+            f"{an['status_line']}\n"
+            f"{an['deadline_line']}\n\n"
+            f"📌 <b>پوزیشن #{pos.id}</b>\n\n"
+            f"{an['details_str']}"
         )
 
-        if total == 1:
-            rep = (
-                f"📊 <b>گزارش پوزیشن (#{pos.id})</b> | {src}\n"
-                f"🎯 <b>نتیجه نهایی:</b> {an['status']}\n"
-                f"━━━━━━━━━\n"
-                f"✅ <b>نقاط تطابق با پروفایل و رزومه:</b>\n{an['m_str']}\n\n"
-                f"🔎 <b>موارد عدم تطابق / نیازمند توجه:</b>\n{an['u_str']}\n"
-                f"━━━━━━━━━\n"
-                f"📋 <b>مدارک احتمالی:</b>\n{an['r_str']}\n"
-                f"{dl_line}"
-            )
-            btn = []
-            if an['is_eligible'] and an['best_url']:
-                btn.append([InlineKeyboardButton("🚀 لینک اپلای پوزیشن", url=an['best_url'])])
-            btn.append([
-                InlineKeyboardButton("💾 ذخیره", callback_data=f"save_{pos.id}"),
-                InlineKeyboardButton("✅ اپلای کردم", callback_data=f"applied_{pos.id}")
-            ])
-            btn.append([InlineKeyboardButton("❌ حذف", callback_data=f"delete_{pos.id}")])
-
-            await wait.delete()
-            await context.bot.send_message(
-                chat_id,
-                rep,
-                reply_markup=InlineKeyboardMarkup(btn),
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            db.close()
-            return
-
-        block = (
-            f"📌 <b>پوزیشن #{pos.id}</b> | {an['status']}\n"
-            f"{an['m_str']}\n"
-            f"{an['u_str']}\n"
-            f"{dl_line}"
+        await context.bot.send_message(
+            chat_id,
+            rep,
+            reply_markup=build_position_buttons(pos.id, an['best_url']),
+            parse_mode="HTML",
+            disable_web_page_preview=True
         )
-        batch_blocks.append(block)
-
-        if an['is_eligible'] and an['best_url']:
-            batch_buttons.append([InlineKeyboardButton(f"🚀 لینک اپلای پوزیشن #{pos.id}", url=an['best_url'])])
+        valid_sent += 1
 
     await wait.delete()
 
-    if total > 1:
-        if not batch_blocks:
-            await context.bot.send_message(
-                chat_id,
-                "⚠️ هیچ‌کدام از پیام‌های ارسالی، پوزیشن اپلای تحصیلی معتبر نبودند."
-            )
-        else:
-            header = (
-                f"📊 <b>گزارش یکپارچه ({total} پیام بررسی شد)</b>\n"
-                f"✅ قابل اپلای: {eligible_count} | ⏳ ددلاین گذشته: {expired_count} | ⚠️ نامربوط: {invalid_count}\n"
-                f"━━━━━━━━━\n\n"
-            )
-            full_report = header + "\n\n━━━━━━━━━\n\n".join(batch_blocks)
-
-            if len(full_report) > 4000:
-                full_report = full_report[:3950] + "\n\n... (ادامه خلاصه شد)"
-
-            await context.bot.send_message(
-                chat_id,
-                full_report,
-                reply_markup=InlineKeyboardMarkup(batch_buttons) if batch_buttons else None,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
+    if valid_sent == 0:
+        await context.bot.send_message(
+            chat_id,
+            "⚠️ لطفاً پیام ارسالی را مجدداً بررسی کنید و فقط پوزیشن اپلای تحصیلی را ارسال کنید:"
+        )
 
     db.close()
 
@@ -712,6 +738,10 @@ async def handle_pos_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if q.data == "edit_profile":
         return
+    if q.data == "no_link":
+        await q.answer("🚫 لینک اپلای برای این پوزیشن در دسترس نیست.", show_alert=True)
+        return
+
     await q.answer("⏳...")
     act, p_id = q.data.split("_")
     db = SessionLocal()
@@ -719,12 +749,17 @@ async def handle_pos_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if p:
         if act == "save":
             p.status = "Saved"
+            action_label = "ذخیره شد 💾"
         elif act == "applied":
             p.status = "Applied"
+            action_label = "در لیست اپلای شده‌ها ثبت شد ✅"
         elif act == "delete":
             db.delete(p)
+            action_label = "حذف شد 🗑"
+        else:
+            action_label = "انجام شد ✅"
         db.commit()
-        await q.edit_message_text(q.message.text_html + f"\n\n✅ <b>عملیات {act} انجام شد!</b>", parse_mode="HTML")
+        await q.edit_message_text(q.message.text_html + f"\n\n✅ <b>پوزیشن {action_label}</b>", parse_mode="HTML")
     db.close()
 
 def main():
