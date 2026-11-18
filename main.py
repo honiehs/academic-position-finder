@@ -68,6 +68,9 @@ def get_user_lang(user_id: int) -> str:
     try:
         user = db.query(UserProfile).filter(UserProfile.telegram_id == user_id).first()
         return user.language if (user and user.language in ('fa', 'en')) else 'fa'
+    except Exception as e:
+        print(f"get_user_lang error: {e}")
+        return 'fa'
     finally:
         db.close()
 

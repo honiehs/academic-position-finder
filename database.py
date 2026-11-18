@@ -45,7 +45,7 @@ def init_db():
     Base.metadata.create_all(engine)
     with engine.connect() as conn:
         try:
-            conn.execute(text("ALTER TABLE user_profiles ADD COLUMN language VARCHAR"))
+            conn.execute(text(f"ALTER TABLE {UserProfile.__tablename__} ADD COLUMN language VARCHAR"))
             conn.commit()
         except Exception:
             pass
